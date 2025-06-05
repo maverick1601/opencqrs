@@ -27,7 +27,7 @@ import java.lang.annotation.*;
  * {@link org.springframework.beans.factory.annotation.AnnotatedBeanDefinition}, for instance within
  * {@link org.springframework.stereotype.Component}s or {@link org.springframework.context.annotation.Configuration}s.
  *
- * @see StateRebuildingHandler.FromObjectAndMetaDataAndSubjectAndRawEvent
+ * @see CommandHandler
  */
 @Target({ElementType.METHOD, ElementType.ANNOTATION_TYPE})
 @Retention(RetentionPolicy.RUNTIME)
@@ -40,5 +40,7 @@ public @interface CommandHandling {
      *
      * @return the sourcing mode to be used, defaults to {@link SourcingMode#RECURSIVE}
      */
-    SourcingMode sourcingMode() default SourcingMode.RECURSIVE;
+    SourcingMode sourcingMode() default SourcingMode.RECURSIVE; // TODO: default entfernen
+
+    Class<? extends SourcingQuery<? extends Command>> query() default DefaultSourcingQuery.class;
 }

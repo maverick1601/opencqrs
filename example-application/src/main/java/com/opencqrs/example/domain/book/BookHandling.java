@@ -11,7 +11,14 @@ import org.springframework.beans.factory.annotation.Autowired;
 @CommandHandlerConfiguration
 public class BookHandling {
 
-    @CommandHandling(sourcingMode = SourcingMode.LOCAL)
+    static class MyQuery implements SourcingQuery<PurchaseBookCommand> {
+        @Override
+        public String queryFor(PurchaseBookCommand command) {
+            return "";
+        }
+    }
+
+    @CommandHandling(sourcingMode = SourcingMode.LOCAL, query = MyQuery.class)
     public String purchase(PurchaseBookCommand command, CommandEventPublisher<Book> publisher) {
         publisher.publish(
                 new BookPurchasedEvent(command.isbn(), command.author(), command.title(), command.numPages()));
