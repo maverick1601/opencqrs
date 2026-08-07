@@ -290,13 +290,14 @@ public class EventHandlingProcessorAutoConfiguration {
                                                 EventSequenceResolver.class);
                                 };
 
-                        DefaultPartitionKeyResolver partitionKeyResolver = new DefaultPartitionKeyResolver(
+                        var partitionKeyResolver = new DefaultPartitionKeyResolver(
                                 processorSettings.lifeCycle().partitions());
                         for (int partition = 0;
                                 partition < processorSettings.lifeCycle().partitions();
                                 partition++) {
-                            var beanName = "openCqrsEventHandlingProcessor_" + group + "_" + partition;
-                            var bd = BeanDefinitionBuilder.genericBeanDefinition(EventHandlingProcessor.class)
+                            var processorBeanName = "openCqrsEventHaSmartInitializingSingletonndlingProcessor_" + group + "_" + partition;
+
+                            var beanDefinition = BeanDefinitionBuilder.genericBeanDefinition(EventHandlingProcessor.class)
                                     .addConstructorArgValue(partition)
                                     .addConstructorArgValue(
                                             processorSettings.fetch().subject())
@@ -309,9 +310,9 @@ public class EventHandlingProcessorAutoConfiguration {
                                     .addConstructorArgValue(ehds)
                                     .addConstructorArgValue(createBackOff(processorSettings.retry()))
                                     .getBeanDefinition();
-                            beanRegistry.registerBeanDefinition(beanName, bd);
+                            beanRegistry.registerBeanDefinition(processorBeanName, beanDefinition);
 
-                            Settings settings = new Settings(
+                            var settings = new Settings(
                                     group,
                                     partition,
                                     processorSettings.fetch().subject(),
@@ -319,7 +320,7 @@ public class EventHandlingProcessorAutoConfiguration {
                                     progressTracker.toString(),
                                     sequenceResolver.toString(),
                                     processorSettings.retry());
-                            log.info(() -> "registered event handling processor '" + beanName + "' with: " + settings);
+                            log.info(() -> "registered event handling processor '" + processorBeanName + "' with: " + settings);
 
                             var lifecycleControllerFactory =
                                     switch (processorSettings.lifeCycle().controllerFactory()) {
@@ -388,10 +389,10 @@ public class EventHandlingProcessorAutoConfiguration {
 
                             var lifecycleController = Objects.requireNonNull(lifecycleControllerFactory)
                                     .createLifecycleBeanDefinition(
-                                            new RuntimeBeanReference(beanName, EventHandlingProcessor.class),
+                                            new RuntimeBeanReference(processorBeanName, EventHandlingProcessor.class),
                                             processorSettings.lifeCycle());
 
-                            beanRegistry.registerBeanDefinition(beanName + "_lifeCycle", lifecycleController);
+                            beanRegistry.registerBeanDefinition(processorBeanName + "_lifeCycle", lifecycleController);
                         }
                     });
         }
