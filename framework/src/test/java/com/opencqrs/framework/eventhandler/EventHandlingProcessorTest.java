@@ -324,7 +324,6 @@ public class EventHandlingProcessorTest {
                 CqrsFrameworkException.TransientException.class,
                 CqrsFrameworkException.class,
                 RuntimeException.class,
-                Error.class
             })
     public void eventRetriedAndRecoveredSuccessfullyForTransientErrors(Class<? extends Throwable> clazz) {
         BookAddedEvent event = new BookAddedEvent("4711");
@@ -379,12 +378,15 @@ public class EventHandlingProcessorTest {
         });
     }
 
-    @Test
-    public void eventProcessorTerminatingOnUnrecoverableNonTransientError() {
+    @ParameterizedTest
+    @ValueSource(
+            classes = {
+                CqrsFrameworkException.NonTransientException.class,
+                Error.class,
+            })
+    public void eventProcessorTerminatingOnUnrecoverableNonTransientError(Class<? extends Throwable> clazz) {
         BookAddedEvent event = new BookAddedEvent("4711");
-        doThrow(CqrsFrameworkException.NonTransientException.class)
-                .when(eventHandler1)
-                .handle(event);
+        doThrow(mock(clazz)).when(eventHandler1).handle(event);
 
         submitEvent(event, Map.of());
 
@@ -394,6 +396,7 @@ public class EventHandlingProcessorTest {
             assertThat(subjectFinished).isTrue();
             assertThat(lastProgress).isNull();
         });
+        verifyNoInteractions(backOff, backOffExecution);
     }
 
     @ParameterizedTest
@@ -405,7 +408,6 @@ public class EventHandlingProcessorTest {
                 CqrsFrameworkException.TransientException.class,
                 CqrsFrameworkException.class,
                 RuntimeException.class,
-                Error.class
             })
     public void undeclaredThrowableFromAnnotatedEventHandlersRetriedIfTransient(Class<? extends Throwable> clazz) {
         BookAddedEvent event = new BookAddedEvent("4711");
@@ -424,10 +426,16 @@ public class EventHandlingProcessorTest {
         });
     }
 
-    @Test
-    public void eventProcessorTerminatingOnUnrecoverableNonTransientErrorFromAnnotatedEventHandlers() {
+    @ParameterizedTest
+    @ValueSource(
+            classes = {
+                CqrsFrameworkException.NonTransientException.class,
+                Error.class,
+            })
+    public void eventProcessorTerminatingOnUnrecoverableNonTransientErrorFromAnnotatedEventHandlers(
+            Class<? extends Throwable> clazz) {
         BookAddedEvent event = new BookAddedEvent("4711");
-        doThrow(new UndeclaredThrowableException(mock(CqrsFrameworkException.NonTransientException.class)))
+        doThrow(new UndeclaredThrowableException(mock(clazz)))
                 .when(eventHandler1)
                 .handle(event);
 
@@ -440,6 +448,7 @@ public class EventHandlingProcessorTest {
 
             assertThat(lastProgress).isNull();
         });
+        verifyNoInteractions(backOff, backOffExecution);
     }
 
     @Test
@@ -495,8 +504,7 @@ public class EventHandlingProcessorTest {
             classes = {
                 CqrsFrameworkException.TransientException.class,
                 CqrsFrameworkException.class,
-                RuntimeException.class,
-                Error.class
+                RuntimeException.class
             })
     public void progressTrackerRetriedOnTransientError(Class<? extends Throwable> clazz) {
         BookAddedEvent event = new BookAddedEvent("4711");

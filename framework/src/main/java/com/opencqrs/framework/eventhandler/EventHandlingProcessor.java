@@ -177,8 +177,8 @@ public class EventHandlingProcessor implements Runnable {
      * Errors or exceptions occurring throughout the event processing loop are handled as follows:
      *
      * <ul>
-     *   <li>{@link CqrsFrameworkException.NonTransientException}s thrown by any matching {@link EventHandler} won't be
-     *       retried and will terminate the processing loop unrecoverably
+     *   <li>{@link CqrsFrameworkException.NonTransientException}s and {@link Error}s thrown by any matching
+     *       {@link EventHandler} won't be retried and will terminate the processing loop unrecoverably
      *   <li>any other {@link Throwable} thrown by any matching {@link EventHandler} is subject to retry
      *   <li>{@link CqrsFrameworkException.TransientException}s thrown by framework components are subject to retry
      *   <li>any thread interruption before or after calling the {@link EventHandler} will terminate the processing
@@ -203,8 +203,8 @@ public class EventHandlingProcessor implements Runnable {
      * whether it is actionable; an event skipped after back-off exhaustion fires no interceptors. An interceptor that
      * throws participates in the same error handling as an {@link EventHandler} above &mdash; a
      * {@link CqrsFrameworkException.NonTransientException} (including an
-     * {@linkplain com.opencqrs.framework.interceptor.InterceptorContractViolation interceptor-contract violation})
-     * terminates the loop unrecoverably; anything else is retried.
+     * {@linkplain com.opencqrs.framework.interceptor.InterceptorContractViolation interceptor-contract violation}) or
+     * an {@link Error} terminates the loop unrecoverably; anything else is retried.
      *
      * <p>Event upcasting, type resolution, deserialization, and the actual event handling all run synchronously on the
      * event-processor thread (the thread {@link #start()} submits {@code this} to), since
@@ -258,7 +258,7 @@ public class EventHandlingProcessor implements Runnable {
                                             retryHandler.reset();
                                             return new Progress.Success(raw.id());
                                         });
-                                    } catch (Error | RuntimeException e) {
+                                    } catch (RuntimeException e) {
                                         throw new EventProcessingFailure(raw, e);
                                     }
                                 });
@@ -268,6 +268,7 @@ public class EventHandlingProcessor implements Runnable {
                             case UndeclaredThrowableException ex -> {
                                 switch (ex.getCause()) {
                                     case CqrsFrameworkException.NonTransientException undeclared -> throw undeclared;
+                                    case Error undeclared -> throw undeclared;
                                     case null, default ->
                                         skipEvent.set(
                                                 retryHandler.handle(e.event, Objects.requireNonNull(ex.getCause())));
@@ -510,9 +511,12 @@ public class EventHandlingProcessor implements Runnable {
     }
 
     /**
-     * Internal unchecked exception marking a failure that occurred while processing a specific event &mdash; the event
-     * handler, upcasting/type resolution/deserialization, or the {@linkplain ProgressTracker#proceed(String, long,
-     * Supplier) progress commit} &mdash; carrying the affected {@link Event}.
+     * Internal unchecked exception wrapping a {@link RuntimeException} that occurred while processing a specific event
+     * &mdash; from the event handler, an interceptor, upcasting/type resolution/deserialization, or the
+     * {@linkplain ProgressTracker#proceed(String, long, Supplier) progress commit} &mdash; carrying the affected
+     * {@link Event}. An {@link Error} is deliberately <strong>not</strong> wrapped: it propagates past this to
+     * {@link #run()}'s terminal {@code catch}, terminating the loop unrecoverably rather than entering the retryable
+     * classification.
      *
      * <p>It is intentionally <strong>not</strong> one of the {@link com.opencqrs.esdb.client.ClientException} subtypes
      * mapped by the {@link com.opencqrs.framework.client.ClientRequestErrorMapper}, so it propagates back out through

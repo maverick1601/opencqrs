@@ -2,7 +2,6 @@
 package com.opencqrs.framework.eventhandler;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.fail;
 import static org.awaitility.Awaitility.await;
 
 import com.opencqrs.esdb.client.EsdbClient;
@@ -594,7 +593,7 @@ public class EventHandlingProcessorIntegrationTest {
             SINK.add(new Handled(label, event.isbn()));
 
             if (failure.afterSideEffect()) {
-                fail();
+                throw new RuntimeException("failing after side-effect for " + event.isbn());
             }
         }
 

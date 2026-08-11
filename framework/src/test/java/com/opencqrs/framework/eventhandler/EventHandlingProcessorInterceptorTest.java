@@ -372,20 +372,13 @@ public class EventHandlingProcessorInterceptorTest {
                 CqrsFrameworkException.TransientException.class,
                 CqrsFrameworkException.class,
                 RuntimeException.class,
-                Error.class
             })
-    public void interceptorThrowingTransientErrorsRetried(Class<? extends Throwable> clazz) {
+    public void interceptorThrowingTransientErrorsRetried(Class<? extends RuntimeException> clazz) {
         BookAddedEvent event = new BookAddedEvent("4711");
         var attempts = new AtomicInteger();
         EventInterceptor flaky = (invocation, lifecycle, continuation) -> {
             if (attempts.getAndIncrement() == 0) {
-                var error = Mockito.mock(clazz);
-                if (error instanceof Error) {
-                    throw (Error) error;
-                }
-                if (error instanceof RuntimeException) {
-                    throw (RuntimeException) error;
-                }
+                throw Mockito.mock(clazz);
             }
             return continuation.proceed();
         };
@@ -403,10 +396,18 @@ public class EventHandlingProcessorInterceptorTest {
             classes = {
                 CqrsFrameworkException.NonTransientException.class,
                 InterceptorContractViolation.class,
+                Error.class,
             })
-    public void interceptorThrowingNonTransientErrorsTerminates(Class<? extends Exception> clazz) throws Exception {
+    public void interceptorThrowingNonTransientErrorsTerminates(Class<? extends Throwable> clazz) throws Exception {
         EventInterceptor terminating = (invocation, lifecycle, continuation) -> {
-            throw Mockito.mock(clazz);
+            var error = Mockito.mock(clazz);
+            if (error instanceof Error) {
+                throw (Error) error;
+            }
+            if (error instanceof RuntimeException) {
+                throw (RuntimeException) error;
+            }
+            return continuation.proceed();
         };
 
         submit(new BookAddedEvent("4711"));
