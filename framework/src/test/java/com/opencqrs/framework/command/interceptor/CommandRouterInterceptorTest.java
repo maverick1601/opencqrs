@@ -29,7 +29,6 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
@@ -131,9 +130,7 @@ class CommandRouterInterceptorTest {
                 List.of(chd),
                 srhds,
                 interceptors,
-                new com.opencqrs.framework.command.cache.NoStateRebuildingCache(),
-                com.opencqrs.framework.metadata.PropagationMode.NONE,
-                Set.of());
+                new com.opencqrs.framework.command.cache.NoStateRebuildingCache());
     }
 
     private CommandHandlerDefinition<Book, BorrowBookCommand, UUID> borrowingHandler(UUID result) {
