@@ -5,6 +5,13 @@ import com.opencqrs.esdb.client.Event;
 import com.opencqrs.esdb.client.Option;
 import com.opencqrs.framework.CqrsFrameworkException;
 import com.opencqrs.framework.client.ClientInterruptedException;
+import com.opencqrs.framework.eventhandler.interceptor.Delivery;
+import com.opencqrs.framework.eventhandler.interceptor.EventHandlerInvocation;
+import com.opencqrs.framework.eventhandler.interceptor.EventInterceptor;
+import com.opencqrs.framework.eventhandler.interceptor.EventInterceptorChain;
+import com.opencqrs.framework.eventhandler.interceptor.EventInterior;
+import com.opencqrs.framework.eventhandler.interceptor.EventInvocation;
+import com.opencqrs.framework.eventhandler.interceptor.Relevance;
 import com.opencqrs.framework.eventhandler.partitioning.EventSequenceResolver;
 import com.opencqrs.framework.eventhandler.partitioning.PartitionKeyResolver;
 import com.opencqrs.framework.eventhandler.progress.Progress;
@@ -49,6 +56,7 @@ public class EventHandlingProcessor implements Runnable {
     final EventSequenceResolver eventSequenceResolver;
     private final PartitionKeyResolver partitionKeyResolver;
     private final List<EventHandlerDefinition> eventHandlerDefinitions;
+    final List<EventInterceptor> eventInterceptors;
     final BackOff backoff;
     private final Delayer delayer;
 
@@ -61,6 +69,7 @@ public class EventHandlingProcessor implements Runnable {
             EventSequenceResolver eventSequenceResolver,
             PartitionKeyResolver partitionKeyResolver,
             List<EventHandlerDefinition> eventHandlerDefinitions,
+            List<EventInterceptor> eventInterceptors,
             BackOff backoff,
             Delayer delayer) {
         if (eventHandlerDefinitions.isEmpty()) {
@@ -85,6 +94,7 @@ public class EventHandlingProcessor implements Runnable {
         this.eventSequenceResolver = eventSequenceResolver;
         this.partitionKeyResolver = partitionKeyResolver;
         this.eventHandlerDefinitions = eventHandlerDefinitions;
+        this.eventInterceptors = eventInterceptors;
         this.backoff = backoff;
         this.delayer = delayer;
     }
@@ -101,6 +111,8 @@ public class EventHandlingProcessor implements Runnable {
      * @param eventSequenceResolver the event sequence resolver to determine the event sequence id
      * @param partitionKeyResolver the partition key resolver to determine if the event needs to be handled {@code this}
      * @param eventHandlerDefinitions a list of {@link EventHandlerDefinition} to dispatch events to
+     * @param eventInterceptors an already-ordered (index {@code 0} = outermost) list of {@link EventInterceptor}s
+     *     wrapping the event processing
      * @param backoff a configurable back-off strategy for retryable errors
      */
     public EventHandlingProcessor(
@@ -112,6 +124,7 @@ public class EventHandlingProcessor implements Runnable {
             EventSequenceResolver eventSequenceResolver,
             PartitionKeyResolver partitionKeyResolver,
             List<EventHandlerDefinition> eventHandlerDefinitions,
+            List<EventInterceptor> eventInterceptors,
             BackOff backoff) {
         this(
                 partition,
@@ -122,6 +135,7 @@ public class EventHandlingProcessor implements Runnable {
                 eventSequenceResolver,
                 partitionKeyResolver,
                 eventHandlerDefinitions,
+                eventInterceptors,
                 backoff,
                 Thread::sleep);
     }
@@ -179,6 +193,19 @@ public class EventHandlingProcessor implements Runnable {
      * {@linkplain BackOff.Execution#next() exhausted} the erroneous event will be skipped, continuing with the next
      * observable event, once available.
      *
+     * <p>The per-event processing &mdash; relevance evaluation, upcasting/conversion, and handler dispatch (steps
+     * 3&ndash;8) &mdash; is wrapped by the applicable {@linkplain EventInterceptor event interceptors} (ordered
+     * outermost-first), inside the {@linkplain ProgressTracker#proceed(String, long, Supplier) progress-tracked} loop
+     * iteration. Each interceptor's root is (re-)invoked <strong>once per attempt</strong> &mdash; including every
+     * retry &mdash; and its {@linkplain com.opencqrs.framework.eventhandler.interceptor.EventLifecycle#handler handler}
+     * advice wraps each matching {@link EventHandler} invocation. Which interceptors fire is decided by their
+     * {@linkplain EventInterceptor#delivery() delivery} level against the event's {@linkplain Relevance relevance} and
+     * whether it is actionable; an event skipped after back-off exhaustion fires no interceptors. An interceptor that
+     * throws participates in the same error handling as an {@link EventHandler} above &mdash; a
+     * {@link CqrsFrameworkException.NonTransientException} (including an
+     * {@linkplain com.opencqrs.framework.interceptor.InterceptorContractViolation interceptor-contract violation})
+     * terminates the loop unrecoverably; anything else is retried.
+     *
      * <p>Event upcasting, type resolution, deserialization, and the actual event handling all run synchronously on the
      * event-processor thread (the thread {@link #start()} submits {@code this} to), since
      * {@link com.opencqrs.esdb.client.EsdbClient#observe(String, Set, Consumer)} consumes the event stream on the
@@ -213,56 +240,7 @@ public class EventHandlingProcessor implements Runnable {
                                     try {
                                         progressTracker.proceed(groupId, partition, () -> {
                                             if (!skipEvent.getAndSet(false)) {
-                                                var rawEventRelevant =
-                                                        switch (eventSequenceResolver) {
-                                                            case EventSequenceResolver.ForRawEvent esr ->
-                                                                partitionKeyResolver.resolve(esr.sequenceIdFor(raw))
-                                                                        == partition;
-                                                            case EventSequenceResolver.ForObjectAndMetaDataAndRawEvent
-                                                                    ignored -> true;
-                                                        };
-                                                if (rawEventRelevant) {
-                                                    rawCallback.upcast((upcastedCallback, upcasted) ->
-                                                            upcastedCallback.convert((metadata, event) -> {
-                                                                var convertedEventRelevant =
-                                                                        switch (eventSequenceResolver) {
-                                                                            case EventSequenceResolver.ForRawEvent
-                                                                                    ignored -> true;
-                                                                            case EventSequenceResolver
-                                                                                            .ForObjectAndMetaDataAndRawEvent
-                                                                                    esr ->
-                                                                                partitionKeyResolver.resolve(
-                                                                                                esr.sequenceIdFor(
-                                                                                                        event,
-                                                                                                        metadata))
-                                                                                        == partition;
-                                                                        };
-                                                                if (convertedEventRelevant) {
-                                                                    eventHandlerDefinitions.stream()
-                                                                            .filter(
-                                                                                    ehd -> ehd.eventClass()
-                                                                                            .isAssignableFrom(
-                                                                                                    upcastedCallback
-                                                                                                            .getEventJavaClass()))
-                                                                            .forEach(ehd -> {
-                                                                                switch (ehd.handler()) {
-                                                                                    case EventHandler.ForObject
-                                                                                            handler ->
-                                                                                        handler.handle(event);
-                                                                                    case EventHandler
-                                                                                                    .ForObjectAndMetaData
-                                                                                            handler ->
-                                                                                        handler.handle(event, metadata);
-                                                                                    case EventHandler
-                                                                                                    .ForObjectAndMetaDataAndRawEvent
-                                                                                            handler ->
-                                                                                        handler.handle(
-                                                                                                event, metadata, raw);
-                                                                                }
-                                                                            });
-                                                                }
-                                                            }));
-                                                }
+                                                process(raw, rawCallback);
 
                                                 if (retryHandler.isRetryExecution()) {
                                                     log.log(
@@ -321,6 +299,128 @@ public class EventHandlingProcessor implements Runnable {
             }
         } finally {
             stop();
+        }
+    }
+
+    /**
+     * Processes a single raw event end to end: determines its partition {@link Relevance}, upcasts and converts it, and
+     * dispatches every partition-relevant converted event to each matching {@link EventHandler} &mdash; the whole thing
+     * wrapped by the applicable {@link EventInterceptor}s (see {@link #applyInterceptors}).
+     *
+     * <p>A wrong-partition event under an {@link EventSequenceResolver.ForRawEvent} resolver is recognized from the raw
+     * event alone and is therefore <strong>not</strong> upcast &mdash; no upcasting is wasted on events routed to
+     * another partition. The chain still runs, with {@link Relevance#NO} and an empty body, so only
+     * {@link Delivery#ALL} interceptors observe it.
+     *
+     * <p>Any other event is upcast <em>once</em> into a buffered fan-out &mdash; introducing no upcasting beyond what
+     * handling already requires &mdash; so its aggregate {@link Relevance} and whether it is <em>actionable</em> (some
+     * partition-relevant converted event has a matching handler) are both known before the interceptor root fires. The
+     * aggregate relevance is {@link Relevance#YES} for a {@code ForRawEvent} resolver (its non-relevant events already
+     * returned above, so even an empty fan-out counts as owned); for a converted resolver it folds the per-event
+     * relevance to {@link Relevance#YES} (all relevant), {@link Relevance#NO} (none relevant, or an empty fan-out), or
+     * {@link Relevance#PARTIAL} (mixed).
+     *
+     * @param raw the raw event to process
+     * @param rawCallback callback used to upcast and convert {@code raw} on demand
+     */
+    private void process(Event raw, EventReader.RawCallback rawCallback) {
+        if (eventSequenceResolver instanceof EventSequenceResolver.ForRawEvent esr
+                && !partitionRelevant(esr.sequenceIdFor(raw))) {
+            applyInterceptors(raw, Relevance.NO, false, chain -> {});
+            return;
+        }
+
+        List<ConvertedEvent> fanOut = new ArrayList<>();
+        rawCallback.upcast((upcastedCallback, upcasted) ->
+                upcastedCallback.convert((metadata, event) -> fanOut.add(new ConvertedEvent(
+                        upcastedCallback.getEventJavaClass(),
+                        event,
+                        metadata,
+                        switch (eventSequenceResolver) {
+                            case EventSequenceResolver.ForRawEvent ignored -> true;
+                            case EventSequenceResolver.ForObjectAndMetaDataAndRawEvent esr ->
+                                partitionRelevant(esr.sequenceIdFor(event, metadata));
+                        }))));
+
+        Relevance relevance =
+                switch (eventSequenceResolver) {
+                    case EventSequenceResolver.ForRawEvent ignored -> Relevance.YES;
+                    case EventSequenceResolver.ForObjectAndMetaDataAndRawEvent<?> ignored -> {
+                        long relevant = fanOut.stream()
+                                .filter(ConvertedEvent::partitionRelevant)
+                                .count();
+                        if (relevant == 0) {
+                            yield Relevance.NO;
+                        } else if (relevant == fanOut.size()) {
+                            yield Relevance.YES;
+                        } else {
+                            yield Relevance.PARTIAL;
+                        }
+                    }
+                };
+
+        boolean actionable = fanOut.stream()
+                .anyMatch(c -> c.partitionRelevant()
+                        && eventHandlerDefinitions.stream()
+                                .anyMatch(ehd -> ehd.eventClass().isAssignableFrom(c.javaClass())));
+
+        applyInterceptors(raw, relevance, actionable, chain -> {
+            for (ConvertedEvent converted : fanOut) {
+                if (!converted.partitionRelevant()) {
+                    continue;
+                }
+                for (EventHandlerDefinition<?> ehd : eventHandlerDefinitions) {
+                    if (ehd.eventClass().isAssignableFrom(converted.javaClass())) {
+                        chain.handler(
+                                new EventHandlerInvocation<>(ehd, converted.event(), converted.metadata()),
+                                () -> invokeHandler(ehd, converted.event(), converted.metadata(), raw));
+                    }
+                }
+            }
+        });
+    }
+
+    /** Single converted event, after upcast fan-out, including its partition relevance. */
+    private record ConvertedEvent(
+            Class<?> javaClass, Object event, Map<String, ?> metadata, boolean partitionRelevant) {}
+
+    private boolean partitionRelevant(String eventSequence) {
+        return partitionKeyResolver.resolve(eventSequence) == partition;
+    }
+
+    /**
+     * Selects the {@link EventInterceptor}s whose {@link Delivery} admits an event of the given {@code relevance} and
+     * {@code actionable}-ness, and runs them (outermost first) around {@code interior}. The chain is always built
+     * &mdash; an empty applicable list is a pass-through that still runs {@code interior} (so handlers fire) but
+     * composes no interceptor root.
+     *
+     * <p>Interceptor advice and the wrapped handlers throw only unchecked exceptions, so anything they raise propagates
+     * unwrapped, leaving the {@linkplain #run() loop} to classify it: a
+     * {@link CqrsFrameworkException.NonTransientException} (or an {@link Error}) terminates the loop, any other
+     * {@link RuntimeException} may retry.
+     *
+     * @param raw the raw event, exposed to interceptors via {@link EventInvocation} and named in error messages
+     * @param relevance the event's aggregate partition relevance
+     * @param actionable whether some partition-relevant converted event has a matching handler
+     * @param interior the per-event body run inside the chain (handler dispatch, or empty)
+     */
+    private void applyInterceptors(Event raw, Relevance relevance, boolean actionable, EventInterior interior) {
+        List<EventInterceptor> applicable = eventInterceptors.stream()
+                .filter(interceptor -> switch (interceptor.delivery()) {
+                    case ACTIONABLE -> relevance != Relevance.NO && actionable;
+                    case PARTITIONED -> relevance != Relevance.NO;
+                    case ALL -> true;
+                })
+                .toList();
+        new EventInterceptorChain(applicable)
+                .execute(new EventInvocation(raw, groupId, partition, relevance), interior);
+    }
+
+    private static void invokeHandler(EventHandlerDefinition ehd, Object event, Map<String, ?> metadata, Event raw) {
+        switch (ehd.handler()) {
+            case EventHandler.ForObject handler -> handler.handle(event);
+            case EventHandler.ForObjectAndMetaData handler -> handler.handle(event, metadata);
+            case EventHandler.ForObjectAndMetaDataAndRawEvent handler -> handler.handle(event, metadata, raw);
         }
     }
 

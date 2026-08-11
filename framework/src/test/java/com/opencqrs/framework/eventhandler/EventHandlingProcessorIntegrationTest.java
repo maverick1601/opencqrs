@@ -6,12 +6,20 @@ import static org.assertj.core.api.Assertions.fail;
 import static org.awaitility.Awaitility.await;
 
 import com.opencqrs.esdb.client.EsdbClient;
+import com.opencqrs.esdb.client.Event;
 import com.opencqrs.esdb.client.Marshaller;
 import com.opencqrs.framework.BookAddedEvent;
 import com.opencqrs.framework.CqrsFrameworkException;
+import com.opencqrs.framework.eventhandler.interceptor.Delivery;
+import com.opencqrs.framework.eventhandler.interceptor.EventInterceptor;
+import com.opencqrs.framework.eventhandler.interceptor.EventInvocation;
+import com.opencqrs.framework.eventhandler.interceptor.EventLifecycle;
+import com.opencqrs.framework.eventhandler.interceptor.Relevance;
 import com.opencqrs.framework.eventhandler.partitioning.DefaultPartitionKeyResolver;
 import com.opencqrs.framework.eventhandler.progress.JdbcProgressTracker;
 import com.opencqrs.framework.eventhandler.progress.Progress;
+import com.opencqrs.framework.interceptor.Continuation;
+import com.opencqrs.framework.interceptor.Proceeded;
 import com.opencqrs.framework.persistence.ImmediateEventPublisher;
 import eu.rekawek.toxiproxy.Proxy;
 import eu.rekawek.toxiproxy.ToxiproxyClient;
@@ -27,6 +35,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.beans.factory.BeanRegistrar;
+import org.springframework.beans.factory.BeanRegistry;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.WebApplicationType;
@@ -39,6 +49,7 @@ import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.DependsOn;
+import org.springframework.context.annotation.Import;
 import org.springframework.core.env.Environment;
 import org.springframework.integration.jdbc.lock.DefaultLockRepository;
 import org.springframework.integration.jdbc.lock.JdbcLockRegistry;
@@ -92,12 +103,18 @@ public class EventHandlingProcessorIntegrationTest {
 
     static final List<Handled> SINK = Collections.synchronizedList(new ArrayList<>());
 
+    /** Records a single event-interceptor root firing, written to by interceptors in any node context. */
+    public record Intercepted(String node, long partition, Delivery delivery, Relevance relevance, Event event) {}
+
+    static final List<Intercepted> INTERCEPTED = Collections.synchronizedList(new ArrayList<>());
+
     @AfterEach
     public void tearDown(@Autowired JdbcTemplate jdbcTemplate) {
         nodesRunning.forEach((s, ctx) -> ctx.close());
         nodesRunning.clear();
 
         SINK.clear();
+        INTERCEPTED.clear();
 
         jdbcTemplate.execute("TRUNCATE EVENTHANDLER_LOCK");
         jdbcTemplate.execute("TRUNCATE EVENTHANDLER_PROGRESS");
@@ -463,7 +480,36 @@ public class EventHandlingProcessorIntegrationTest {
         });
     }
 
+    @Test
+    public void allDeliveryInterceptorAlsoObservesEventsOnNonOwningPartitions() {
+        var rootSubject = "/test/" + UUID.randomUUID();
+
+        startNode("A", rootSubject);
+        startPartitionOnNode("A", 0, true);
+        startPartitionOnNode("A", 1, true);
+
+        var e0 = immediateEventPublisher.publish(subjectForPartition(rootSubject, 0), new BookAddedEvent("e0"));
+
+        await().untilAsserted(() -> {
+            assertThat(SINK).containsExactly(new Handled("A", "e0"));
+
+            assertThat(INTERCEPTED)
+                    .filteredOn(o -> o.delivery() == Delivery.ALL)
+                    .as("event interception enforced on both partitions using Delivery.ALL")
+                    .containsExactlyInAnyOrder(
+                            new Intercepted("A", 0, Delivery.ALL, Relevance.YES, e0),
+                            new Intercepted("A", 1, Delivery.ALL, Relevance.NO, e0));
+
+            assertThat(INTERCEPTED)
+                    .filteredOn(o -> o.delivery() == Delivery.ACTIONABLE)
+                    .singleElement()
+                    .as("event intercepted on one ACTIONABLE partition only")
+                    .isEqualTo(new Intercepted("A", 0, Delivery.ACTIONABLE, Relevance.YES, e0));
+        });
+    }
+
     @EnableAutoConfiguration
+    @Import(NodeApplication.EventInterceptorRegistrar.class)
     static class NodeApplication {
 
         /** Per-context, mutable countdown of remaining transient failures per event id (from configuration). */
@@ -549,6 +595,35 @@ public class EventHandlingProcessorIntegrationTest {
 
             if (failure.afterSideEffect()) {
                 fail();
+            }
+        }
+
+        static class EventInterceptorRegistrar implements BeanRegistrar {
+
+            @Override
+            public void register(BeanRegistry registry, Environment env) {
+                Arrays.stream(Delivery.values()).forEach(delivery -> {
+                    registry.registerBean(EventInterceptor.class, spec -> {
+                        spec.supplier(ctx -> new EventInterceptor() {
+                            @Override
+                            public Delivery delivery() {
+                                return delivery;
+                            }
+
+                            @Override
+                            public Proceeded intercept(
+                                    EventInvocation invocation, EventLifecycle lifecycle, Continuation continuation) {
+                                INTERCEPTED.add(new Intercepted(
+                                        env.getRequiredProperty("test.node.label"),
+                                        invocation.partition(),
+                                        delivery(),
+                                        invocation.relevance(),
+                                        invocation.rawEvent()));
+                                return continuation.proceed();
+                            }
+                        });
+                    });
+                });
             }
         }
 
