@@ -10,7 +10,6 @@ import com.opencqrs.esdb.client.Event;
 import com.opencqrs.esdb.client.EventCandidate;
 import com.opencqrs.esdb.client.Precondition;
 import com.opencqrs.framework.*;
-import com.opencqrs.framework.client.ConcurrencyException;
 import com.opencqrs.framework.command.*;
 import com.opencqrs.framework.command.interceptor.CommandInterceptor;
 import com.opencqrs.framework.command.interceptor.CommandInvocation;
@@ -325,11 +324,13 @@ public class CommandAndEventHandlingIntegrationTest {
         switch (f1.state()) {
             case SUCCESS -> {
                 assertThat(f2.state()).isEqualTo(Future.State.FAILED);
-                assertThat(f2.exceptionNow()).isInstanceOf(ConcurrencyException.class);
+                assertThat(f2.exceptionNow())
+                        .isInstanceOf(CqrsFrameworkException.TransientException.ConcurrencyException.class);
             }
             case FAILED -> {
                 assertThat(f2.state()).isEqualTo(Future.State.SUCCESS);
-                assertThat(f1.exceptionNow()).isInstanceOf(ConcurrencyException.class);
+                assertThat(f1.exceptionNow())
+                        .isInstanceOf(CqrsFrameworkException.TransientException.ConcurrencyException.class);
             }
         }
     }
@@ -351,7 +352,8 @@ public class CommandAndEventHandlingIntegrationTest {
         for (int i = 0; i < 2; i++) {
             Future<Void> f = completionService.take();
             assertThat(f.state()).isEqualTo(Future.State.FAILED);
-            assertThat(f.exceptionNow()).isInstanceOf(ConcurrencyException.class);
+            assertThat(f.exceptionNow())
+                    .isInstanceOf(CqrsFrameworkException.TransientException.ConcurrencyException.class);
         }
     }
 
@@ -380,11 +382,13 @@ public class CommandAndEventHandlingIntegrationTest {
         switch (f1.state()) {
             case SUCCESS -> {
                 assertThat(f2.state()).isEqualTo(Future.State.FAILED);
-                assertThat(f2.exceptionNow()).isInstanceOf(ConcurrencyException.class);
+                assertThat(f2.exceptionNow())
+                        .isInstanceOf(CqrsFrameworkException.TransientException.ConcurrencyException.class);
             }
             case FAILED -> {
                 assertThat(f2.state()).isEqualTo(Future.State.SUCCESS);
-                assertThat(f1.exceptionNow()).isInstanceOf(ConcurrencyException.class);
+                assertThat(f1.exceptionNow())
+                        .isInstanceOf(CqrsFrameworkException.TransientException.ConcurrencyException.class);
             }
         }
     }
@@ -404,7 +408,8 @@ public class CommandAndEventHandlingIntegrationTest {
         CommandConsistencyHandling.NoSourcingCommand command =
                 new CommandConsistencyHandling.NoSourcingCommand(subject, subjectCondition);
 
-        assertThatThrownBy(() -> commandRouter.send(command)).isInstanceOf(ConcurrencyException.class);
+        assertThatThrownBy(() -> commandRouter.send(command))
+                .isInstanceOf(CqrsFrameworkException.TransientException.ConcurrencyException.class);
     }
 
     @Test

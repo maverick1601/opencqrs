@@ -64,6 +64,8 @@ tasks.register<Javadoc>("aggregateJavadoc") {
                 exclude { it.file == project(":framework-spring-boot-autoconfigure")
                     .file("src/main/java/com/opencqrs/framework/metadata/package-info.java") }
                 exclude { it.file == project(":framework-spring-boot-autoconfigure")
+                    .file("src/main/java/com/opencqrs/framework/optimisticlocking/package-info.java") }
+                exclude { it.file == project(":framework-spring-boot-autoconfigure")
                     .file("src/main/java/com/opencqrs/framework/persistence/package-info.java") }
                 exclude { it.file == project(":framework-spring-boot-autoconfigure")
                     .file("src/main/java/com/opencqrs/framework/serialization/package-info.java") }
